@@ -8,7 +8,7 @@ import { Grid } from "react-loader-spinner";
 
 import { FaCheck } from "react-icons/fa6";
 import { IoIosStats } from "react-icons/io";
-import { LuMove3D, LuRotate3D, LuScale3D } from "react-icons/lu";
+import { LuGrid3X3, LuMove3D, LuRotate3D, LuScale3D, LuScaling, LuRotateCw } from "react-icons/lu";
 import { GiArrowCursor, GiTeapot, GiWireframeGlobe } from "react-icons/gi";
 
 import {
@@ -40,6 +40,7 @@ import {
 
 import { Button } from "../../ui/shadcn/ui/button";
 import { Toggle } from "../../ui/shadcn/ui/toggle";
+import { EditorInspectorNumberField } from "./inspector/fields/number";
 import { Progress } from "../../ui/shadcn/ui/progress";
 import { ToolbarRadioGroup, ToolbarRadioGroupItem } from "../../ui/shadcn/ui/toolbar-radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../ui/shadcn/ui/select";
@@ -60,10 +61,17 @@ import { getCameraFocusPositionFor } from "../../tools/camera/focus";
 import { ITweenConfiguration, Tween } from "../../tools/animation/tween";
 import { checkProjectCachedCompressedTextures } from "../../tools/assets/ktx";
 import { createSceneLink, getRootSceneLink } from "../../tools/scene/scene-link";
+import {
+	defaultGizmoSnapPreferences,
+	gizmoSnapMinStep,
+	IGizmoSnapPreferences,
+	roundGizmoSnapSteps,
+} from "../../tools/gizmo-snap-preferences";
 import { UniqueNumber, waitNextAnimationFrame, waitUntil } from "../../tools/tools";
 import { isSprite, isSpriteManagerNode, isSpriteMapNode } from "../../tools/guards/sprites";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "../../ui/shadcn/ui/dropdown-menu";
-import { isAbstractMesh, isAnyTransformNode, isCamera, isCollisionInstancedMesh, isCollisionMesh, isLight, isNode } from "../../tools/guards/nodes";
+import { Popover, PopoverContent, PopoverTrigger } from "../../ui/shadcn/ui/popover";
+import { isAbstractMesh, isAnyTransformNode, isCamera, isCollisionInstancedMesh, isCollisionMesh, isInstancedMesh, isLight, isMesh, isNode } from "../../tools/guards/nodes";
 
 import { EditorCamera } from "../nodes/camera";
 
@@ -128,6 +136,8 @@ export interface IEditorPreviewState {
 	 * "fit" means the canvas will fit the entire panel container.
 	 */
 	fixedDimensions: "720p" | "1080p" | "4k" | "fit";
+
+	gizmoSnap: IGizmoSnapPreferences;
 }
 
 export class EditorPreview extends Component<IEditorPreviewProps, IEditorPreviewState> {
@@ -196,6 +206,16 @@ export class EditorPreview extends Component<IEditorPreviewProps, IEditorPreview
 	private _workingCanvas: HTMLCanvasElement | null = null;
 	private _mainView: EngineView | null = null;
 
+	/**
+	 * Mutable holder for gizmo snap step fields; EditorInspectorNumberField writes via setInspectorEffectivePropertyValue.
+	 * Synced from state when rendering the gizmo snap toolbar.
+	 */
+	private _gizmoSnapNumberFields: Pick<IGizmoSnapPreferences, "translationStep" | "rotationStepDegrees" | "scaleStep"> = {
+		translationStep: 0,
+		rotationStepDegrees: 0,
+		scaleStep: 0,
+	};
+
 	/** @internal */
 	public _previewCamera: Camera | null = null;
 
@@ -213,6 +233,8 @@ export class EditorPreview extends Component<IEditorPreviewProps, IEditorPreview
 
 			playEnabled: false,
 			playSceneLoadingProgress: 0,
+
+			gizmoSnap: { ...defaultGizmoSnapPreferences },
 		};
 
 		ipcRenderer.on("gizmo:position", () => this.setActiveGizmo("position"));
@@ -547,6 +569,7 @@ export class EditorPreview extends Component<IEditorPreviewProps, IEditorPreview
 		this.camera.attachControl(true);
 
 		this.gizmo = new EditorPreviewGizmo(this.scene);
+		this.gizmo.setSnapPreferences(this.state.gizmoSnap);
 
 		this.selectionOutlineLayer = new SelectionOutlineLayer("selectionOutline", this.scene);
 		this.selectionOutlineLayer.outlineThickness = 4;
@@ -876,9 +899,130 @@ export class EditorPreview extends Component<IEditorPreviewProps, IEditorPreview
 		);
 	}
 
+	private _commitGizmoSnap(next: IGizmoSnapPreferences): void {
+		const normalized = roundGizmoSnapSteps(next);
+		this.setState({ gizmoSnap: normalized });
+		this.gizmo?.setSnapPreferences(normalized);
+	}
+
+	public updateGizmoSnapPreferences(prefs: IGizmoSnapPreferences): void {
+		this._commitGizmoSnap({ ...prefs });
+	}
+
+	private _getGizmoSnapToolbarControls(): ReactNode {
+		const snap = this.state.gizmoSnap;
+		const min = gizmoSnapMinStep;
+
+		this._gizmoSnapNumberFields.translationStep = snap.translationStep;
+		this._gizmoSnapNumberFields.rotationStepDegrees = snap.rotationStepDegrees;
+		this._gizmoSnapNumberFields.scaleStep = snap.scaleStep;
+
+		const bumpTranslation = (v: number) => this._commitGizmoSnap({ ...snap, translationStep: Math.max(min, v) });
+		const bumpRotation = (v: number) => this._commitGizmoSnap({ ...snap, rotationStepDegrees: Math.max(min, v) });
+		const bumpScale = (v: number) => this._commitGizmoSnap({ ...snap, scaleStep: Math.max(min, v) });
+
+		const snapRowClass = "grid grid-cols-[minmax(0,7rem)_auto_minmax(0,1fr)] items-center gap-3";
+		const snapToggleClass = (enabled: boolean) =>
+			`rounded-md border border-input h-9 w-9 px-0 shrink-0 justify-center shadow-sm ${enabled ? "bg-primary/20" : "bg-background"}`;
+
+		return (
+			<Popover>
+				<PopoverTrigger asChild>
+					<Button type="button" variant="outline" className="h-9 px-3 shrink-0 border-input bg-background shadow-sm">
+						Snap
+					</Button>
+				</PopoverTrigger>
+				<PopoverContent align="start" side="bottom" className="w-auto max-w-none min-w-[20rem] p-4">
+					<div className="flex flex-col gap-3">
+						<div className={snapRowClass}>
+							<div className="text-sm font-medium text-muted-foreground">Translation</div>
+							<Tooltip>
+								<TooltipTrigger asChild>
+									<Toggle
+										pressed={snap.translationEnabled}
+										onPressedChange={(on) => this._commitGizmoSnap({ ...snap, translationEnabled: on })}
+										className={snapToggleClass(snap.translationEnabled)}
+										aria-label="Translation grid snap"
+									>
+										<LuGrid3X3 className="h-4 w-4" />
+									</Toggle>
+								</TooltipTrigger>
+								<TooltipContent>Translation grid snap</TooltipContent>
+							</Tooltip>
+							<div className="min-w-0">
+								<EditorInspectorNumberField
+									object={this._gizmoSnapNumberFields}
+									property="translationStep"
+									noUndoRedo
+									step={0.01}
+									min={min}
+									onChange={(v) => bumpTranslation(v)}
+								/>
+							</div>
+						</div>
+
+						<div className={snapRowClass}>
+							<div className="text-sm font-medium text-muted-foreground">Rotation</div>
+							<Tooltip>
+								<TooltipTrigger asChild>
+									<Toggle
+										pressed={snap.rotationEnabled}
+										onPressedChange={(on) => this._commitGizmoSnap({ ...snap, rotationEnabled: on })}
+										className={snapToggleClass(snap.rotationEnabled)}
+										aria-label="Rotation snap"
+									>
+										<LuRotateCw className="h-4 w-4" />
+									</Toggle>
+								</TooltipTrigger>
+								<TooltipContent>Rotation snap (degrees)</TooltipContent>
+							</Tooltip>
+							<div className="min-w-0">
+								<EditorInspectorNumberField
+									object={this._gizmoSnapNumberFields}
+									property="rotationStepDegrees"
+									noUndoRedo
+									step={0.01}
+									min={min}
+									onChange={(v) => bumpRotation(v)}
+								/>
+							</div>
+						</div>
+
+						<div className={snapRowClass}>
+							<div className="text-sm font-medium text-muted-foreground">Scale</div>
+							<Tooltip>
+								<TooltipTrigger asChild>
+									<Toggle
+										pressed={snap.scaleEnabled}
+										onPressedChange={(on) => this._commitGizmoSnap({ ...snap, scaleEnabled: on })}
+										className={snapToggleClass(snap.scaleEnabled)}
+										aria-label="Scale snap"
+									>
+										<LuScaling className="h-4 w-4" />
+									</Toggle>
+								</TooltipTrigger>
+								<TooltipContent>Scale snap (incremental step)</TooltipContent>
+							</Tooltip>
+							<div className="min-w-0">
+								<EditorInspectorNumberField
+									object={this._gizmoSnapNumberFields}
+									property="scaleStep"
+									noUndoRedo
+									step={0.01}
+									min={min}
+									onChange={(v) => bumpScale(v)}
+								/>
+							</div>
+						</div>
+					</div>
+				</PopoverContent>
+			</Popover>
+		);
+	}
+
 	private _getEditToolbar(): ReactNode {
 		return (
-			<div className="flex gap-2 items-center h-10">
+			<div className="flex flex-wrap gap-2 items-center h-10">
 				<TooltipProvider>
 					<Select value={this.scene?.activeCamera?.id} onOpenChange={(o) => o && this.forceUpdate()} onValueChange={(v) => this._switchToCamera(v)}>
 						<SelectTrigger className="w-36 border-none bg-muted/50">
@@ -956,6 +1100,10 @@ export class EditorPreview extends Component<IEditorPreviewProps, IEditorPreview
 						</TooltipTrigger>
 						<TooltipContent>Toggle wireframe</TooltipContent>
 					</Tooltip>
+
+					<Separator orientation="vertical" className="mx-1 h-[24px]" />
+
+					{this._getGizmoSnapToolbarControls()}
 
 					<Separator orientation="vertical" className="mx-1 h-[24px]" />
 
